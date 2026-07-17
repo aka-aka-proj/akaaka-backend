@@ -48,6 +48,20 @@ Deno.serve(async (req: Request) => {
 
     const serviceClient = createClient(supabaseUrl, serviceRoleKey)
 
+    // Delete related data that references profiles (no ON DELETE CASCADE)
+    await serviceClient.from('events').delete().eq('creator_id', userId)
+    await serviceClient.from('event_threads').delete().eq('profile_id', userId)
+    await serviceClient.from('recommendations').delete().eq('from_profile_id', userId)
+    await serviceClient.from('recommendations').delete().eq('to_profile_id', userId)
+    await serviceClient.from('blocks').delete().eq('blocker_id', userId)
+    await serviceClient.from('blocks').delete().eq('blocked_id', userId)
+    await serviceClient.from('reports').delete().eq('reporter_id', userId)
+    await serviceClient.from('moderation_actions').delete().eq('admin_id', userId)
+    await serviceClient.from('moderation_actions').delete().eq('target_profile_id', userId)
+    await serviceClient.from('audit_logs').delete().eq('actor_id', userId)
+    await serviceClient.from('audit_logs').delete().eq('target_profile_id', userId)
+
+    // Delete profile
     const { error: deleteProfileError } = await serviceClient
       .from('profiles')
       .delete()
