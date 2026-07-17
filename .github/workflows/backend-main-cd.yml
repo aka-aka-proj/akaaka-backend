@@ -1,4 +1,4 @@
-name: Backend Main CD Skeleton
+name: Backend Main CD (Supabase + Vercel)
 
 on:
   push:
@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       source_count: ${{ steps.detect.outputs.source_count }}
+      has_supabase_migrations: ${{ steps.detect.outputs.has_supabase_migrations }}
+      has_supabase_functions: ${{ steps.detect.outputs.has_supabase_functions }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,7 +31,20 @@ jobs:
           set -euo pipefail
 
           SOURCE_COUNT="$(git ls-files | { grep -E '^(src|app|cmd|internal|api|mcp|server)/|(\.ts|\.tsx|\.js|\.jsx|\.mjs|\.cjs|\.py|\.go|\.rs|\.java|\.kt|\.cs)$' || true; } | wc -l | tr -d ' ')"
+          HAS_SUPABASE_MIGRATIONS="false"
+          HAS_SUPABASE_FUNCTIONS="false"
+
+          if git ls-files | grep -q '^supabase/migrations/'; then
+            HAS_SUPABASE_MIGRATIONS="true"
+          fi
+
+          if git ls-files | grep -q '^supabase/functions/'; then
+            HAS_SUPABASE_FUNCTIONS="true"
+          fi
+
           echo "source_count=$SOURCE_COUNT" >> "$GITHUB_OUTPUT"
+          echo "has_supabase_migrations=$HAS_SUPABASE_MIGRATIONS" >> "$GITHUB_OUTPUT"
+          echo "has_supabase_functions=$HAS_SUPABASE_FUNCTIONS" >> "$GITHUB_OUTPUT"
 
       - name: Fail fast when nothing deployable exists
         shell: bash
@@ -40,38 +55,121 @@ jobs:
             exit 1
           fi
 
-  migrate:
+  supabase:
     runs-on: ubuntu-latest
     needs: preflight
     environment: production
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Migration placeholder
+      - name: Skip when no Supabase artifacts
+        if: needs.preflight.outputs.has_supabase_migrations != 'true' && needs.preflight.outputs.has_supabase_functions != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          echo "Run schema/data migrations here before deploy."
-          echo "Example:"
-          echo "  ./scripts/cd/migrate.sh"
-          echo "Keep this step idempotent and retry-safe."
+          echo "No supabase/migrations or supabase/functions found. Skipping Supabase migration/functions deploy."
+
+      - name: Validate Supabase secrets
+        if: needs.preflight.outputs.has_supabase_migrations == 'true' || needs.preflight.outputs.has_supabase_functions == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MISSING=()
+          for key in SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_REF SUPABASE_DB_PASSWORD; do
+            if [[ -z "${!key:-}" ]]; then
+              MISSING+=("$key")
+            fi
+          done
+          if [[ "${#MISSING[@]}" -gt 0 ]]; then
+            echo "::error::Missing Supabase secrets: ${MISSING[*]}"
+            exit 1
+          fi
+
+      - name: Setup Supabase CLI
+        if: needs.preflight.outputs.has_supabase_migrations == 'true' || needs.preflight.outputs.has_supabase_functions == 'true'
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link Supabase project
+        if: needs.preflight.outputs.has_supabase_migrations == 'true' || needs.preflight.outputs.has_supabase_functions == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+
+      - name: Apply Supabase migrations
+        if: needs.preflight.outputs.has_supabase_migrations == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase db push
+
+      - name: Deploy Supabase functions
+        if: needs.preflight.outputs.has_supabase_functions == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          FOUND=0
+          for dir in supabase/functions/*/; do
+            name="$(basename "$dir")"
+            if [[ "$name" == "_shared" ]]; then
+              continue
+            fi
+            FOUND=1
+            supabase functions deploy "$name" --project-ref "$SUPABASE_PROJECT_REF"
+          done
+          if [[ "$FOUND" -eq 0 ]]; then
+            echo "No deployable Supabase functions found under supabase/functions."
+          fi
 
   deploy:
     runs-on: ubuntu-latest
     needs:
       - preflight
-      - migrate
+      - supabase
     environment: production
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy placeholder
+      - name: Validate Vercel secrets
         shell: bash
         run: |
           set -euo pipefail
-          echo "Deploy API/MCP service after successful migration."
-          echo "Example:"
-          echo "  ./scripts/cd/deploy.sh"
-          echo "Integrate cloud/provider-specific deployment in this step."
+          MISSING=()
+          for key in VERCEL_TOKEN VERCEL_ORG_ID VERCEL_PROJECT_ID; do
+            if [[ -z "${!key:-}" ]]; then
+              MISSING+=("$key")
+            fi
+          done
+          if [[ "${#MISSING[@]}" -gt 0 ]]; then
+            echo "::error::Missing Vercel secrets: ${MISSING[*]}"
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Vercel CLI
+        run: npm install --global vercel@latest
+
+      - name: Deploy API/MCP to Vercel
+        shell: bash
+        run: |
+          set -euo pipefail
+          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          vercel build --prod --token="$VERCEL_TOKEN"
+          vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
