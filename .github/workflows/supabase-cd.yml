@@ -1,0 +1,116 @@
+name: Supabase CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-cd
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_supabase_migrations: ${{ steps.detect.outputs.has_supabase_migrations }}
+      has_supabase_functions: ${{ steps.detect.outputs.has_supabase_functions }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Supabase artifacts
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HAS_MIGRATIONS="false"
+          HAS_FUNCTIONS="false"
+
+          if git ls-files | grep -q '^supabase/migrations/'; then
+            HAS_MIGRATIONS="true"
+          fi
+
+          if git ls-files | grep -q '^supabase/functions/'; then
+            HAS_FUNCTIONS="true"
+          fi
+
+          echo "has_supabase_migrations=$HAS_MIGRATIONS" >> "$GITHUB_OUTPUT"
+          echo "has_supabase_functions=$HAS_FUNCTIONS" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when nothing to deploy
+        if: steps.detect.outputs.has_supabase_migrations != 'true' && steps.detect.outputs.has_supabase_functions != 'true'
+        shell: bash
+        run: |
+          echo "No supabase/migrations or supabase/functions found. Nothing to deploy."
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: detect
+    if: needs.detect.outputs.has_supabase_migrations == 'true' || needs.detect.outputs.has_supabase_functions == 'true'
+    environment: production
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Supabase secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          MISSING=()
+          for key in SUPABASE_ACCESS_TOKEN SUPABASE_PROJECT_REF SUPABASE_DB_PASSWORD; do
+            if [[ -z "${!key:-}" ]]; then
+              MISSING+=("$key")
+            fi
+          done
+          if [[ "${#MISSING[@]}" -gt 0 ]]; then
+            echo "::error::Missing Supabase secrets: ${MISSING[*]}"
+            exit 1
+          fi
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link Supabase project
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase link --project-ref "$SUPABASE_PROJECT_REF" --password "$SUPABASE_DB_PASSWORD"
+
+      - name: Apply migrations
+        if: needs.detect.outputs.has_supabase_migrations == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          supabase db push
+
+      - name: Deploy functions
+        if: needs.detect.outputs.has_supabase_functions == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          FOUND=0
+          for dir in supabase/functions/*/; do
+            name="$(basename "$dir")"
+            if [[ "$name" == "_shared" ]]; then
+              continue
+            fi
+            FOUND=1
+            echo "Deploying function: $name"
+            supabase functions deploy "$name" --project-ref "$SUPABASE_PROJECT_REF"
+          done
+          if [[ "$FOUND" -eq 0 ]]; then
+            echo "No deployable functions found."
+          fi
