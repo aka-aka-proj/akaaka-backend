@@ -1,0 +1,77 @@
+name: Backend Main CD Skeleton
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-main-cd
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      source_count: ${{ steps.detect.outputs.source_count }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect backend sources
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SOURCE_COUNT="$(git ls-files | { grep -E '^(src|app|cmd|internal|api|mcp|server)/|(\.ts|\.tsx|\.js|\.jsx|\.mjs|\.cjs|\.py|\.go|\.rs|\.java|\.kt|\.cs)$' || true; } | wc -l | tr -d ' ')"
+          echo "source_count=$SOURCE_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Fail fast when nothing deployable exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.detect.outputs.source_count }}" -eq 0 ]]; then
+            echo "::error::No backend API/MCP source detected. Skip deploy until service code exists."
+            exit 1
+          fi
+
+  migrate:
+    runs-on: ubuntu-latest
+    needs: preflight
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Migration placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Run schema/data migrations here before deploy."
+          echo "Example:"
+          echo "  ./scripts/cd/migrate.sh"
+          echo "Keep this step idempotent and retry-safe."
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs:
+      - preflight
+      - migrate
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy placeholder
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Deploy API/MCP service after successful migration."
+          echo "Example:"
+          echo "  ./scripts/cd/deploy.sh"
+          echo "Integrate cloud/provider-specific deployment in this step."
